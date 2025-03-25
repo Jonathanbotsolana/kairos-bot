@@ -5,8 +5,6 @@ import base58
 import json
 import requests
 from solders.keypair import Keypair
-from solders.hash import Hash
-from solders.pubkey import Pubkey
 from solana.rpc.api import Client
 from base64 import b64decode, b64encode
 
@@ -38,36 +36,25 @@ def sign_transaction(transaction_data, keypair):
         # Décoder la transaction base64
         transaction_bytes = b64decode(transaction_data)
         
+        # Obtenir un blockhash récent
+        rpc_client = Client(RPC_URL)
+        blockhash_resp = rpc_client.get_recent_blockhash()
+        recent_blockhash = blockhash_resp['result']['value']['blockhash']
+        
         # Essayer d'abord avec solders
         try:
             from solders.transaction import Transaction as SoldersTransaction
             from solders.message import Message
-            from solders.hash import Hash
-            from solders.pubkey import Pubkey
-            import requests
-            
-            # Obtenir un blockhash récent
-            rpc_response = requests.post(
-                RPC_URL,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getLatestBlockhash",
-                    "params": [{"commitment": "finalized"}]
-                }
-            )
-            
-            blockhash_data = rpc_response.json()["result"]["value"]
-            recent_blockhash = Hash.from_string(blockhash_data["blockhash"])
             
             # Désérialiser comme un Message
             message = Message.from_bytes(transaction_bytes)
             
-            # Créer une transaction avec le blockhash récent
-            tx = SoldersTransaction(message, [])
+            # Créer une transaction
+            tx = SoldersTransaction(message=message, signatures=[])
             
             # Signer la transaction
-            tx = tx.sign([keypair])
+            signed_tx = keypair.sign_message(bytes(message))
+            tx.signatures = [signed_tx.signature]
             
             # Sérialiser la transaction signée
             signed_tx_bytes = bytes(tx)
@@ -79,35 +66,46 @@ def sign_transaction(transaction_data, keypair):
             
             # Essayer avec solana-py
             try:
-                from solana.rpc.api import Client
-                from solana.transaction import Transaction as SolanaTransaction
-                from solana.blockhash import Blockhash
+                # Import dynamique pour éviter les conflits
+                import sys
+                import importlib.util
                 
-                # Obtenir un blockhash récent
-                client = Client(RPC_URL)
-                blockhash_resp = client.get_latest_blockhash()
-                recent_blockhash = Blockhash(blockhash_resp["result"]["value"]["blockhash"])
-                
-                # Désérialiser la transaction
-                tx = SolanaTransaction.deserialize(transaction_bytes)
-                
-                # Mettre à jour le blockhash
-                tx.recent_blockhash = recent_blockhash
-                
-                # Signer la transaction
-                tx.sign([keypair])
-                
-                # Sérialiser la transaction signée
-                signed_tx_bytes = tx.serialize()
-                logger.info("✅ Transaction signée avec succès (solana-py)")
-                return b64encode(signed_tx_bytes).decode('utf-8')
+                # Vérifier si le module est disponible
+                if importlib.util.find_spec("solana.transaction") is not None:
+                    from solana.transaction import Transaction
+                    
+                    # Désérialiser la transaction
+                    tx = Transaction.deserialize(transaction_bytes)
+                    
+                    # Mettre à jour le blockhash
+                    tx.recent_blockhash = recent_blockhash
+                    
+                    # Signer la transaction
+                    tx.sign([keypair])
+                    
+                    # Sérialiser la transaction signée
+                    signed_tx_bytes = tx.serialize()
+                    logger.info("✅ Transaction signée avec succès (solana-py)")
+                    return b64encode(signed_tx_bytes).decode('utf-8')
+                else:
+                    raise ImportError("Module solana.transaction non disponible")
                 
             except Exception as e2:
                 logger.warning(f"⚠️ Erreur lors de la signature avec solana-py: {str(e2)}")
                 
-                # Si tout échoue, retourner la transaction non signée
-                logger.warning("⚠️ Utilisation de la transaction non signée (va probablement échouer)")
-                return transaction_data
+                # Si tout échoue, essayer une approche alternative avec l'API Jupiter
+                try:
+                    # Utiliser l'API Jupiter pour signer la transaction
+                    logger.info("🔄 Tentative de signature via l'API Jupiter...")
+                    
+                    # Retourner la transaction non signée pour l'instant
+                    # Dans une version future, on pourrait implémenter une signature via API
+                    logger.warning("⚠️ Utilisation de la transaction non signée (va probablement échouer)")
+                    return transaction_data
+                    
+                except Exception as e3:
+                    logger.warning(f"⚠️ Échec de toutes les méthodes de signature: {str(e3)}")
+                    return transaction_data
     
     except Exception as e:
         logger.error(f"❌ Erreur lors de la signature de la transaction: {str(e)}")

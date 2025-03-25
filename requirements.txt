@@ -1,5 +1,5 @@
 flask
 base58
-solana-sdk>=0.29.1
-solders>=0.18.1
+solana==0.25.6
+solders
 requests
