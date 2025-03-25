@@ -212,8 +212,8 @@ def get_jupiter_quote(amount_usdc=1.0):
             "amount": amount_in_lamports,
             "slippageBps": 100,  # 1% de slippage maximum
             "platformFeeBps": 0,  # Pas de frais de plateforme
-            "onlyDirectRoutes": False,
-            "maxAccounts": 10  # Limiter le nombre de comptes pour réduire la taille de la transaction
+            "onlyDirectRoutes": False  # Utiliser un booléen Python, pas une chaîne
+            # "maxAccounts": 10
         }
         
         logger.info(f"🔍 Obtention du devis pour {amount_usdc} USDC → SOL...")
