@@ -211,9 +211,8 @@ def get_jupiter_quote(amount_usdc=1.0):
             "outputMint": SOL_MINT,
             "amount": amount_in_lamports,
             "slippageBps": 100,  # 1% de slippage maximum
-            "platformFeeBps": 0,  # Pas de frais de plateforme
-            "onlyDirectRoutes": False  # Utiliser un booléen Python, pas une chaîne
-            # "maxAccounts": 10
+            "platformFeeBps": 0  # Pas de frais de plateforme
+            # Ne pas inclure onlyDirectRoutes pour éviter les erreurs de parsing
         }
         
         logger.info(f"🔍 Obtention du devis pour {amount_usdc} USDC → SOL...")
@@ -227,11 +226,30 @@ def get_jupiter_quote(amount_usdc=1.0):
                     logger.info(f"⏱️ Tentative {retry+1}/{max_retries} pour obtenir un devis (attente: {backoff_time}s)...")
                     time.sleep(backoff_time)
                 
-                response = requests.get(
-                    f"{JUPITER_API_BASE}/quote", 
-                    params=quote_params,
-                    timeout=15  # Timeout augmenté
-                )
+                # Log the exact URL and parameters being sent
+                request_url = f"{JUPITER_API_BASE}/quote"
+                logger.info(f"🔍 Requête API: {request_url} avec paramètres: {quote_params}")
+                
+                # Utiliser une session requests pour plus de contrôle
+                session = requests.Session()
+                
+                # Construire l'URL manuellement pour éviter tout problème de sérialisation
+                url_params = []
+                for key, value in quote_params.items():
+                    # Convertir les valeurs en chaînes appropriées
+                    if isinstance(value, bool):
+                        # Convertir les booléens en 'true' ou 'false' (minuscules)
+                        url_params.append(f"{key}={'true' if value else 'false'}")
+                    else:
+                        url_params.append(f"{key}={value}")
+                
+                full_url = f"{request_url}?{'&'.join(url_params)}"
+                logger.info(f"🔍 URL construite manuellement: {full_url}")
+                
+                response = session.get(full_url, timeout=15)
+                
+                # Log the actual request URL that was sent
+                logger.info(f"🔍 URL complète envoyée: {response.request.url}")
                 
                 if response.status_code == 200:
                     data = response.json()
