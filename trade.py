@@ -5,6 +5,8 @@ import base58
 import json
 import requests
 from solders.keypair import Keypair
+from solders.hash import Hash
+from solders.pubkey import Pubkey
 from solana.rpc.api import Client
 from base64 import b64decode, b64encode
 
@@ -40,13 +42,32 @@ def sign_transaction(transaction_data, keypair):
         try:
             from solders.transaction import Transaction as SoldersTransaction
             from solders.message import Message
+            from solders.hash import Hash
+            from solders.pubkey import Pubkey
+            import requests
             
-            # Désérialiser comme un Message puis créer une transaction
+            # Obtenir un blockhash récent
+            rpc_response = requests.post(
+                RPC_URL,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getLatestBlockhash",
+                    "params": [{"commitment": "finalized"}]
+                }
+            )
+            
+            blockhash_data = rpc_response.json()["result"]["value"]
+            recent_blockhash = Hash.from_string(blockhash_data["blockhash"])
+            
+            # Désérialiser comme un Message
             message = Message.from_bytes(transaction_bytes)
+            
+            # Créer une transaction avec le blockhash récent
             tx = SoldersTransaction(message, [])
             
             # Signer la transaction
-            tx = tx.sign_unchecked([keypair])
+            tx = tx.sign([keypair])
             
             # Sérialiser la transaction signée
             signed_tx_bytes = bytes(tx)
@@ -58,13 +79,23 @@ def sign_transaction(transaction_data, keypair):
             
             # Essayer avec solana-py
             try:
-                from solana.transaction import Transaction
+                from solana.rpc.api import Client
+                from solana.transaction import Transaction as SolanaTransaction
+                from solana.blockhash import Blockhash
+                
+                # Obtenir un blockhash récent
+                client = Client(RPC_URL)
+                blockhash_resp = client.get_latest_blockhash()
+                recent_blockhash = Blockhash(blockhash_resp["result"]["value"]["blockhash"])
                 
                 # Désérialiser la transaction
-                tx = Transaction.deserialize(transaction_bytes)
+                tx = SolanaTransaction.deserialize(transaction_bytes)
+                
+                # Mettre à jour le blockhash
+                tx.recent_blockhash = recent_blockhash
                 
                 # Signer la transaction
-                tx.sign_partial([keypair])
+                tx.sign([keypair])
                 
                 # Sérialiser la transaction signée
                 signed_tx_bytes = tx.serialize()
