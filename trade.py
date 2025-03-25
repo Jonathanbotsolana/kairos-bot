@@ -252,8 +252,9 @@ def get_jupiter_quote(amount_usdc=1.0):
             "outputMint": SOL_MINT,
             "amount": amount_in_lamports,
             "slippageBps": 100,  # 1% de slippage maximum (augmenté pour plus de flexibilité)
-            "onlyDirectRoutes": False,
-            "asLegacyTransaction": False,  # Utiliser les transactions versionnées
+            # Suppression des paramètres qui causent des erreurs
+            # "onlyDirectRoutes": False,
+            # "asLegacyTransaction": False,
             "platformFeeBps": 0  # Pas de frais de plateforme
         }
         
@@ -316,10 +317,11 @@ def create_jupiter_transaction(wallet_address, quote_data, priority_fee=5000):
             "quoteResponse": quote_data,
             "userPublicKey": wallet_address,
             "wrapAndUnwrapSol": True,
-            "prioritizationFeeLamports": priority_fee,
-            "computeUnitPriceMicroLamports": priority_fee,  # Ajouter un prix pour les unités de calcul
-            "maxRetries": 3,  # Nombre de tentatives en cas d'échec
-            "skipUserAccountsCheck": False  # Vérifier les comptes de l'utilisateur
+            "prioritizationFeeLamports": priority_fee
+            # Suppression des paramètres qui pourraient causer des problèmes
+            # "computeUnitPriceMicroLamports": priority_fee,
+            # "maxRetries": 3,
+            # "skipUserAccountsCheck": False
         }
         
         logger.info(f"🏗️ Création d'une transaction via Jupiter (priorité: {priority_fee} lamports)...")
