@@ -1,7 +1,7 @@
 flask
 base58
 solana==0.36.6
-solders
+solders>=0.26.0
 requests
 web3
 python-dotenv
@@ -19,7 +19,6 @@ retry
 backoff
 # Sécurité et gestion des clés
 cryptography
-anchorpy
 # Utilitaires
 pytz
 python-dateutil
