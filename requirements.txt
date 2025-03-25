@@ -3,3 +3,4 @@ base58
 solana==0.36.6
 solders
 requests
+web3
