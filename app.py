@@ -74,7 +74,7 @@ def trigger_trade():
             })
         else:
             # Si pas de fichier trade.py, on exécute directement la fonction main de trade
-            from trade_logic import main as trade_main
+            from trade import main as trade_main
             result = trade_main(keypair)
             return jsonify({
                 "status": "Trade executed directly",
