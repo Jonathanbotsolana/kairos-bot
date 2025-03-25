@@ -6,6 +6,7 @@ import json
 import requests
 import importlib.util
 from solders.keypair import Keypair
+from solders.hash import Hash
 from solana.rpc.api import Client
 from base64 import b64decode, b64encode
 
@@ -57,13 +58,15 @@ def sign_transaction(transaction_data, keypair):
         # Approche simplifiée: signer directement le message de transaction
         try:
             # Signer directement les données de transaction
-            signed_data = keypair.sign_message(transaction_bytes)
-            signature = signed_data.signature
+            signature_obj = keypair.sign_message(transaction_bytes)
+            
+            # La signature est l'objet lui-même, pas un attribut
+            signature_bytes = bytes(signature_obj)
             
             # Créer une structure simplifiée pour la transaction signée
             signed_tx_data = {
                 "transaction": transaction_data,
-                "signature": base58.b58encode(bytes(signature)).decode('utf-8'),
+                "signature": base58.b58encode(signature_bytes).decode('utf-8'),
                 "pubkey": str(keypair.pubkey())
             }
             
@@ -81,22 +84,31 @@ def sign_transaction(transaction_data, keypair):
         except Exception as e:
             logger.warning(f"⚠️ Erreur lors de la signature simplifiée: {str(e)}")
             
-            # Essayer avec solders
+            # Essayer avec solders en utilisant le blockhash récent
             try:
                 from solders.transaction import Transaction as SoldersTransaction
                 from solders.message import Message
+                from solders.hash import Hash
                 
                 # Désérialiser comme un Message
                 message = Message.from_bytes(transaction_bytes)
                 
-                # Créer une transaction (sans utiliser le paramètre signatures)
-                tx = SoldersTransaction(message, [])
+                # Créer une transaction avec le blockhash récent
+                if recent_blockhash:
+                    blockhash = Hash.from_string(recent_blockhash)
+                    # Créer une transaction avec le blockhash récent
+                    tx = SoldersTransaction(message, [], blockhash)
+                else:
+                    # Fallback sans blockhash
+                    tx = SoldersTransaction(message, [])
                 
                 # Signer la transaction avec le keypair
-                signed_tx = keypair.sign_message(bytes(message))
+                signature_obj = keypair.sign_message(bytes(message))
+                
+                # La signature est l'objet lui-même
+                signatures = [signature_obj]
                 
                 # Créer une nouvelle transaction avec la signature
-                signatures = [signed_tx.signature]
                 tx_signed = SoldersTransaction(message, signatures)
                 
                 # Sérialiser la transaction signée
@@ -118,10 +130,12 @@ def sign_transaction(transaction_data, keypair):
                         message = versioned_tx.message
                         
                         # Signer le message
-                        signed_data = keypair.sign_message(bytes(message))
+                        signature_obj = keypair.sign_message(bytes(message))
+                        
+                        # La signature est l'objet lui-même
+                        signatures = [signature_obj]
                         
                         # Créer une nouvelle transaction avec la signature
-                        signatures = [signed_data.signature]
                         tx_signed = VersionedTransaction(message, signatures)
                         
                         # Sérialiser la transaction signée
