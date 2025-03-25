@@ -95,7 +95,12 @@ def sign_transaction(transaction_data, keypair):
                     signature = SoldersSignature.from_bytes(signature_bytes)
                     
                     # Créer une transaction signée avec le blockhash récent
-                    tx = SoldersTransaction(message, [signature], blockhash)
+                    # Passer une liste de keypairs au lieu du message directement
+                    tx = SoldersTransaction.sign_from_keypairs(
+                        message=message,
+                        keypairs=[keypair],
+                        recent_blockhash=blockhash
+                    )
                     
                     # Sérialiser et encoder en base64
                     signed_tx_bytes = bytes(tx)
@@ -166,20 +171,19 @@ def sign_transaction(transaction_data, keypair):
                 # Créer une transaction avec le blockhash récent
                 if recent_blockhash:
                     blockhash = Hash.from_string(recent_blockhash)
-                    # Créer une transaction avec le blockhash récent
-                    tx = SoldersTransaction(message, [], blockhash)
+                    # Utiliser sign_from_keypairs au lieu de créer manuellement la transaction
+                    tx_signed = SoldersTransaction.sign_from_keypairs(
+                        message=message,
+                        keypairs=[keypair],
+                        recent_blockhash=blockhash
+                    )
                 else:
-                    # Fallback sans blockhash
-                    tx = SoldersTransaction(message, [])
-                
-                # Signer la transaction avec le keypair
-                signature_obj = keypair.sign_message(bytes(message))
-                
-                # La signature est l'objet lui-même
-                signatures = [signature_obj]
-                
-                # Créer une nouvelle transaction avec la signature
-                tx_signed = SoldersTransaction(message, signatures)
+                    # Fallback sans blockhash - utiliser sign_from_keypairs avec None comme blockhash
+                    tx_signed = SoldersTransaction.sign_from_keypairs(
+                        message=message,
+                        keypairs=[keypair],
+                        recent_blockhash=None
+                    )
                 
                 # Sérialiser la transaction signée
                 signed_tx_bytes = bytes(tx_signed)
@@ -199,14 +203,11 @@ def sign_transaction(transaction_data, keypair):
                         versioned_tx = VersionedTransaction.from_bytes(transaction_bytes)
                         message = versioned_tx.message
                         
-                        # Signer le message
-                        signature_obj = keypair.sign_message(bytes(message))
-                        
-                        # La signature est l'objet lui-même
-                        signatures = [signature_obj]
-                        
-                        # Créer une nouvelle transaction avec la signature
-                        tx_signed = VersionedTransaction(message, signatures)
+                        # Utiliser sign_from_keypairs pour les transactions versionnées
+                        tx_signed = VersionedTransaction.sign_from_keypairs(
+                            message=message,
+                            keypairs=[keypair]
+                        )
                         
                         # Sérialiser la transaction signée
                         signed_tx_bytes = bytes(tx_signed)
@@ -250,7 +251,10 @@ def get_jupiter_quote(amount_usdc=1.0):
             "inputMint": USDC_MINT,
             "outputMint": SOL_MINT,
             "amount": amount_in_lamports,
-            "slippageBps": 50,  # 0.5% de slippage maximum
+            "slippageBps": 100,  # 1% de slippage maximum (augmenté pour plus de flexibilité)
+            "onlyDirectRoutes": False,
+            "asLegacyTransaction": False,  # Utiliser les transactions versionnées
+            "platformFeeBps": 0  # Pas de frais de plateforme
         }
         
         logger.info(f"🔍 Obtention du devis pour {amount_usdc} USDC → SOL...")
@@ -264,6 +268,15 @@ def get_jupiter_quote(amount_usdc=1.0):
             
             # Calculer l'impact sur le prix
             price_impact_percent = float(data.get("priceImpactPct", 0)) * 100
+            
+            # Afficher des informations supplémentaires sur la route
+            route_info = data.get("routePlan", [])
+            if route_info:
+                route_summary = []
+                for step in route_info:
+                    swap_info = f"{step.get('swapInfo', {}).get('label', 'Unknown')}"
+                    route_summary.append(swap_info)
+                logger.info(f"🛣️ Route: {' → '.join(route_summary)}")
             
             return {
                 "status": "success",
@@ -303,24 +316,36 @@ def create_jupiter_transaction(wallet_address, quote_data, priority_fee=5000):
             "quoteResponse": quote_data,
             "userPublicKey": wallet_address,
             "wrapAndUnwrapSol": True,
-            "prioritizationFeeLamports": priority_fee
+            "prioritizationFeeLamports": priority_fee,
+            "computeUnitPriceMicroLamports": priority_fee,  # Ajouter un prix pour les unités de calcul
+            "maxRetries": 3,  # Nombre de tentatives en cas d'échec
+            "skipUserAccountsCheck": False  # Vérifier les comptes de l'utilisateur
         }
         
         logger.info(f"🏗️ Création d'une transaction via Jupiter (priorité: {priority_fee} lamports)...")
         swap_response = requests.post(f"{JUPITER_API_BASE}/swap", json=swap_params)
         
         if swap_response.status_code != 200:
+            error_text = swap_response.text
+            logger.error(f"❌ Erreur API Jupiter: {error_text}")
             return {
                 "status": "error",
-                "message": f"Erreur lors de la création de la transaction: {swap_response.text}"
+                "message": f"Erreur lors de la création de la transaction: {error_text}"
             }
         
         swap_data = swap_response.json()
         transaction_data = swap_data["swapTransaction"]
         
+        # Vérifier si d'autres informations utiles sont disponibles
+        other_info = {}
+        for key in ["addressLookupTableAddresses", "swapTransactionLogs"]:
+            if key in swap_data:
+                other_info[key] = swap_data[key]
+        
         return {
             "status": "success",
-            "transaction": transaction_data
+            "transaction": transaction_data,
+            "other_info": other_info
         }
         
     except Exception as e:
@@ -330,7 +355,74 @@ def create_jupiter_transaction(wallet_address, quote_data, priority_fee=5000):
             "message": str(e)
         }
 
-def send_transaction(transaction_data, skip_preflight=True):
+def check_transaction_status(tx_signature, max_retries=5):
+    """
+    Vérifie le statut d'une transaction après son envoi
+    
+    Args:
+        tx_signature: Signature de la transaction
+        max_retries: Nombre maximum de tentatives
+        
+    Returns:
+        dict: Statut de la transaction
+    """
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            # Attendre un peu avant de vérifier
+            time.sleep(2)
+            
+            # Créer une requête RPC
+            payload = {
+                "jsonrpc": "2.0",
+                "id": str(int(time.time())),
+                "method": "getTransaction",
+                "params": [
+                    tx_signature,
+                    {
+                        "commitment": "confirmed",
+                        "encoding": "json"
+                    }
+                ]
+            }
+            
+            # Envoyer la requête
+            headers = {"Content-Type": "application/json"}
+            response = requests.post(RPC_URL, headers=headers, json=payload)
+            result = response.json()
+            
+            # Vérifier si la transaction a été confirmée
+            if "result" in result and result["result"] is not None:
+                tx_data = result["result"]
+                if tx_data.get("meta", {}).get("err") is None:
+                    logger.info(f"✅ Transaction confirmée: {tx_signature}")
+                    return {
+                        "status": "confirmed",
+                        "txid": tx_signature
+                    }
+                else:
+                    error = tx_data.get("meta", {}).get("err")
+                    logger.error(f"❌ Transaction échouée: {error}")
+                    return {
+                        "status": "failed",
+                        "error": str(error),
+                        "txid": tx_signature
+                    }
+            
+            logger.info(f"⏳ Transaction en attente, nouvelle tentative ({retry_count+1}/{max_retries})...")
+            retry_count += 1
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur lors de la vérification de la transaction: {str(e)}")
+            retry_count += 1
+    
+    logger.warning(f"⚠️ Impossible de confirmer la transaction après {max_retries} tentatives")
+    return {
+        "status": "unknown",
+        "txid": tx_signature
+    }
+
+def send_transaction(transaction_data, skip_preflight=False):
     """
     Envoie une transaction signée via l'API RPC de Solana
     
@@ -372,7 +464,7 @@ def send_transaction(transaction_data, skip_preflight=True):
             "params": [
                 transaction_data,
                 {
-                    "skipPreflight": skip_preflight,
+                    "skipPreflight": False,  # Activer les vérifications préliminaires pour détecter les erreurs
                     "preflightCommitment": "confirmed",
                     "encoding": "base64",
                     "maxRetries": 5
@@ -388,34 +480,40 @@ def send_transaction(transaction_data, skip_preflight=True):
             error_message = result['error'].get('message', 'Erreur inconnue')
             logger.error(f"❌ Erreur RPC: {error_message}")
             
+            # Analyser l'erreur pour obtenir plus d'informations
+            if "Transaction simulation failed" in error_message:
+                # Extraire les logs d'erreur pour un diagnostic plus précis
+                logs = result['error'].get('data', {}).get('logs', [])
+                if logs:
+                    logger.error(f"❌ Logs de simulation: {logs}")
+                    return {
+                        "status": "error",
+                        "message": f"Échec de la simulation: {logs[-1] if logs else error_message}"
+                    }
+            
             # Si l'erreur est liée à la signature ou au blockhash, essayer un RPC alternatif
             if "signature" in error_message.lower() or "blockhash" in error_message.lower():
                 logger.info("🔄 Tentative avec un RPC alternatif...")
                 
                 # Utiliser un RPC alternatif
-                alt_rpc_url = "https://api.mainnet-beta.solana.com"
+                alt_rpc_url = "https://solana-mainnet.g.alchemy.com/v2/demo"  # Utiliser Alchemy comme alternative
                 alt_response = requests.post(alt_rpc_url, headers=headers, json=payload)
                 alt_result = alt_response.json()
                 
                 if "error" in alt_result:
                     alt_error = alt_result['error'].get('message', 'Erreur inconnue')
                     logger.error(f"❌ Erreur RPC alternative: {alt_error}")
-                    
-                    # Pour les tests, générer une signature aléatoire
-                    import random
-                    import string
-                    random_signature = ''.join(random.choices(string.hexdigits, k=64)).lower()
-                    tx_signature = random_signature
-                    logger.info(f"🔄 Utilisation d'une signature de test: {tx_signature}")
+                    return {
+                        "status": "error",
+                        "message": f"Échec de l'envoi: {alt_error}"
+                    }
                 else:
                     tx_signature = alt_result["result"]
             else:
-                # Pour les tests, générer une signature aléatoire
-                import random
-                import string
-                random_signature = ''.join(random.choices(string.hexdigits, k=64)).lower()
-                tx_signature = random_signature
-                logger.info(f"🔄 Utilisation d'une signature de test: {tx_signature}")
+                return {
+                    "status": "error",
+                    "message": f"Échec de l'envoi: {error_message}"
+                }
         else:
             tx_signature = result["result"]
         
@@ -485,7 +583,7 @@ def execute_jupiter_swap_direct(keypair, quote_data):
             logger.info("🔄 Nouvelle tentative avec des frais de priorité plus élevés...")
             
             # Créer une nouvelle transaction avec des frais plus élevés
-            retry_tx_result = create_jupiter_transaction(wallet_address, quote_data, priority_fee=10000)
+            retry_tx_result = create_jupiter_transaction(wallet_address, quote_data, priority_fee=20000)
             
             if retry_tx_result["status"] != "success":
                 return {
@@ -497,7 +595,7 @@ def execute_jupiter_swap_direct(keypair, quote_data):
             signed_retry_tx = sign_transaction(retry_tx_result["transaction"], keypair)
             
             # Envoyer la nouvelle transaction
-            retry_send_result = send_transaction(signed_retry_tx)
+            retry_send_result = send_transaction(signed_retry_tx, skip_preflight=False)
             
             if retry_send_result["status"] != "success":
                 return {
@@ -508,15 +606,35 @@ def execute_jupiter_swap_direct(keypair, quote_data):
             # Utiliser le résultat de la nouvelle tentative
             send_result = retry_send_result
         
+        # Vérifier le statut de la transaction
+        tx_status = check_transaction_status(send_result["txid"])
+        
         # 4. Créer le résultat final
-        return {
-            "status": "pending",
-            "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
-            "txid": send_result["txid"],
-            "explorer_url": send_result["explorer_url"],
-            "input_amount": 1.0,
-            "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000
-        }
+        if tx_status["status"] == "confirmed":
+            return {
+                "status": "success",
+                "message": "Transaction confirmée avec succès",
+                "txid": send_result["txid"],
+                "explorer_url": send_result["explorer_url"],
+                "input_amount": 1.0,
+                "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000
+            }
+        elif tx_status["status"] == "failed":
+            return {
+                "status": "error",
+                "message": f"Transaction échouée: {tx_status.get('error', 'Erreur inconnue')}",
+                "txid": send_result["txid"],
+                "explorer_url": send_result["explorer_url"]
+            }
+        else:
+            return {
+                "status": "pending",
+                "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
+                "txid": send_result["txid"],
+                "explorer_url": send_result["explorer_url"],
+                "input_amount": 1.0,
+                "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000
+            }
             
     except Exception as e:
         error_msg = f"Erreur lors de l'exécution du swap: {str(e)}"
