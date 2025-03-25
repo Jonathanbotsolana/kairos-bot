@@ -1,60 +1,70 @@
+#!/usr/bin/env python3
 import os
-import base58
-import subprocess
-from flask import Flask, jsonify
-from solders.keypair import Keypair
+import time
+import logging
 
-# 🔐 Clé Phantom exportée en base58 depuis l'environnement Render
-phantom_base58 = os.getenv("PHANTOM_PRIVATE_KEY_BASE58")
-if not phantom_base58:
-    raise ValueError("⚠️ Variable d'environnement PHANTOM_PRIVATE_KEY_BASE58 manquante")
+# Configuration du logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("kairos-trade")
 
-try:
-    decoded = base58.b58decode(phantom_base58)
-    if len(decoded) == 64:
-        keypair = Keypair.from_bytes(decoded)
-    elif len(decoded) == 32:
-        raise ValueError("❌ Clé Phantom trop courte : 32 bytes. Exporte-la depuis Phantom, pas depuis seed.")
-    else:
-        raise ValueError("❌ Format non reconnu")
-except Exception as e:
-    raise RuntimeError(f"❌ Erreur de décodage de la clé Phantom : {e}")
-
-wallet_address = str(keypair.pubkey())
-print(f"✅ Wallet chargé : {wallet_address}")
-
-# === FLASK SERVER ===
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return jsonify({"message": "Kairos bot API is up", "wallet": wallet_address})
-
-@app.route("/status")
-def status():
-    return jsonify({
-        "bot": "Kairos",
-        "network": "mainnet-beta",
-        "status": "active",
-        "wallet": wallet_address
-    })
-
-@app.route("/trade")
-def trigger_trade():
+def main(keypair=None):
+    """
+    Fonction principale de la logique de trading
+    
+    Args:
+        keypair: Objet Keypair de Solana (optionnel, peut être passé depuis app.py)
+    
+    Returns:
+        dict: Résultat de l'opération de trading
+    """
+    logger.info("🚀 Démarrage de la logique de trading Kairos")
+    
     try:
-        print("🚀 Lancement manuel de trade.py via /trade")
-        result = subprocess.run(["python", "trade.py"], capture_output=True, text=True)
-        return jsonify({
-            "status": "Trade executed manually",
-            "stdout": result.stdout,
-            "stderr": result.stderr
-        })
+        # Si keypair n'est pas fourni, on tente de le récupérer depuis l'environnement
+        if keypair is None:
+            import base58
+            from solders.keypair import Keypair
+            
+            phantom_key = os.environ.get("PHANTOM_KEY_BASE58")
+            if not phantom_key:
+                logger.error("⚠️ Variable d'environnement PHANTOM_KEY_BASE58 manquante")
+                return {"status": "error", "message": "Clé manquante"}
+            
+            decoded = base58.b58decode(phantom_key)
+            if len(decoded) == 64:
+                keypair = Keypair.from_bytes(decoded)
+            elif len(decoded) == 32:
+                keypair = Keypair.from_seed(decoded)
+            else:
+                logger.error("❌ Format de clé incorrect")
+                return {"status": "error", "message": "Format de clé incorrect"}
+        
+        wallet_address = str(keypair.pubkey())
+        logger.info(f"✅ Wallet préparé: {wallet_address}")
+        
+        # Simulation de la logique de trading
+        logger.info("💹 Analyse du marché en cours...")
+        time.sleep(2)  # Simuler un travail
+        
+        # Ici, tu ajouteras ta vraie logique de trading avec Solana
+        
+        logger.info("✅ Cycle de trading terminé avec succès")
+        return {
+            "status": "success",
+            "wallet": wallet_address,
+            "timestamp": time.time()
+        }
+        
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ Erreur lors de l'exécution du bot: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
-    print("🎯 Lancement automatique de trade.py au démarrage")
-    subprocess.Popen(["python", "trade.py"])
-    app.run(host="0.0.0.0", port=10000)
+    # Ce code s'exécute uniquement si le fichier est appelé directement
+    result = main()
+    logger.info(f"⏹️ Script terminé avec résultat: {result}")
 
 

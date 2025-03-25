@@ -8,3 +8,5 @@ services:
     envVars:
       - key: WALLET_ADDRESS
         value: 8UQuZwPYEPnEhVvaodMmEjm3HcNMBRRuDd13jKVdBZqG
+      - key: PHANTOM_KEY_BASE58
+        sync: false  # Cette variable doit être configurée manuellement dans le dashboard Render
