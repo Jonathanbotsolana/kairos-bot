@@ -38,54 +38,76 @@ def sign_transaction(transaction_data, keypair):
         # Décoder la transaction base64
         transaction_bytes = b64decode(transaction_data)
         
-        # Obtenir un blockhash récent via RPC direct
+        # Obtenir un blockhash récent via RPC direct - essayer plusieurs endpoints
+        rpc_endpoints = [
+            RPC_URL,
+            "https://api.mainnet-beta.solana.com",
+            "https://solana-mainnet.rpc.extrnode.com",
+            "https://rpc.ankr.com/solana"
+        ]
+        
+        recent_blockhash = None
+        for rpc_url in rpc_endpoints:
+            try:
+                rpc_response = requests.post(
+                    rpc_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getLatestBlockhash",
+                        "params": [{"commitment": "finalized"}]
+                    },
+                    timeout=5
+                )
+                if rpc_response.status_code == 200:
+                    result = rpc_response.json()
+                    if "result" in result and "value" in result["result"]:
+                        recent_blockhash = result["result"]["value"]["blockhash"]
+                        logger.info(f"✅ Blockhash récent obtenu: {recent_blockhash}")
+                        break
+            except Exception as e:
+                logger.debug(f"Échec d'obtention du blockhash via {rpc_url}: {str(e)}")
+        
+        if not recent_blockhash:
+            logger.warning("⚠️ Impossible d'obtenir un blockhash récent, utilisation de la transaction telle quelle")
+        
+        # Détection du format de transaction
+        is_versioned = False
         try:
-            rpc_response = requests.post(
-                RPC_URL,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getLatestBlockhash",
-                    "params": [{"commitment": "finalized"}]
-                }
-            )
-            recent_blockhash = rpc_response.json()["result"]["value"]["blockhash"]
-            logger.info(f"✅ Blockhash récent obtenu: {recent_blockhash}")
-        except Exception as e:
-            logger.warning(f"⚠️ Erreur lors de l'obtention du blockhash: {str(e)}")
-            recent_blockhash = None
+            # Vérifier si c'est une transaction versionnée (commence par 0x80)
+            if transaction_bytes and len(transaction_bytes) > 0 and transaction_bytes[0] == 0x80:
+                is_versioned = True
+                logger.info("🔍 Transaction versionnée détectée (format 0x80)")
+        except Exception:
+            pass
         
         # Essayer d'abord de traiter comme une transaction versionnée (format Jupiter v6)
-        try:
-            from solders.transaction import VersionedTransaction
-            from solders.signature import Signature as SoldersSignature
-            
-            # Essayer de désérialiser comme une transaction versionnée
+        if is_versioned:
             try:
-                # Vérifier si c'est une transaction versionnée (commence par 0x80)
-                if transaction_bytes[0] == 0x80:
-                    versioned_tx = VersionedTransaction.from_bytes(transaction_bytes)
-                    
-                    # Signer le message
-                    message_bytes = bytes(versioned_tx.message)
-                    signature = keypair.sign_message(message_bytes)
-                    
-                    # Créer une nouvelle transaction versionnée avec la signature
-                    signatures = [SoldersSignature.from_bytes(bytes(signature))]
-                    
-                    # Créer une nouvelle transaction versionnée
-                    new_tx = VersionedTransaction(versioned_tx.message, signatures)
-                    
-                    # Sérialiser et encoder en base64
-                    signed_tx_bytes = bytes(new_tx)
-                    signed_tx_b64 = b64encode(signed_tx_bytes).decode('utf-8')
-                    
-                    logger.info("✅ Transaction versionnée signée avec succès")
-                    return signed_tx_b64
+                from solders.transaction import VersionedTransaction
+                from solders.signature import Signature as SoldersSignature
+                
+                # Désérialiser comme une transaction versionnée
+                versioned_tx = VersionedTransaction.from_bytes(transaction_bytes)
+                
+                # Signer le message
+                message_bytes = bytes(versioned_tx.message)
+                signature = keypair.sign_message(message_bytes)
+                
+                # Créer une nouvelle transaction versionnée avec la signature
+                signatures = [SoldersSignature.from_bytes(bytes(signature))]
+                
+                # Créer une nouvelle transaction versionnée
+                new_tx = VersionedTransaction(versioned_tx.message, signatures)
+                
+                # Sérialiser et encoder en base64
+                signed_tx_bytes = bytes(new_tx)
+                signed_tx_b64 = b64encode(signed_tx_bytes).decode('utf-8')
+                
+                logger.info("✅ Transaction versionnée signée avec succès")
+                return signed_tx_b64
             except Exception as e_versioned:
-                logger.warning(f"⚠️ Pas une transaction versionnée: {str(e_versioned)}")
-        except ImportError:
-            logger.warning("⚠️ Module VersionedTransaction non disponible")
+                logger.warning(f"⚠️ Erreur lors de la signature de transaction versionnée: {str(e_versioned)}")
         
         # Essayer avec le format Jupiter (transaction au format JSON)
         try:
@@ -188,46 +210,79 @@ def get_jupiter_quote(amount_usdc=1.0):
             "inputMint": USDC_MINT,
             "outputMint": SOL_MINT,
             "amount": amount_in_lamports,
-            "slippageBps": 100,  # 1% de slippage maximum (augmenté pour plus de flexibilité)
-            # Suppression des paramètres qui causent des erreurs
-            # "onlyDirectRoutes": False,
-            # "asLegacyTransaction": False,
-            "platformFeeBps": 0  # Pas de frais de plateforme
+            "slippageBps": 100,  # 1% de slippage maximum
+            "platformFeeBps": 0,  # Pas de frais de plateforme
+            "onlyDirectRoutes": False,
+            "maxAccounts": 10  # Limiter le nombre de comptes pour réduire la taille de la transaction
         }
         
         logger.info(f"🔍 Obtention du devis pour {amount_usdc} USDC → SOL...")
-        response = requests.get(f"{JUPITER_API_BASE}/quote", params=quote_params)
         
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Calculer le montant de sortie en SOL (conversion de lamports à SOL)
-            out_amount_sol = float(data["outAmount"]) / 1_000_000_000
-            
-            # Calculer l'impact sur le prix
-            price_impact_percent = float(data.get("priceImpactPct", 0)) * 100
-            
-            # Afficher des informations supplémentaires sur la route
-            route_info = data.get("routePlan", [])
-            if route_info:
-                route_summary = []
-                for step in route_info:
-                    swap_info = f"{step.get('swapInfo', {}).get('label', 'Unknown')}"
-                    route_summary.append(swap_info)
-                logger.info(f"🛣️ Route: {' → '.join(route_summary)}")
-            
-            return {
-                "status": "success",
-                "out_amount": out_amount_sol,
-                "price_impact": f"{price_impact_percent:.4f}%",
-                "quote_response": data
-            }
-        else:
-            logger.error(f"❌ Erreur API Jupiter: {response.status_code} - {response.text}")
-            return {
-                "status": "error",
-                "message": f"Erreur API Jupiter: {response.status_code}"
-            }
+        # Essayer plusieurs fois avec backoff exponentiel
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                if retry > 0:
+                    backoff_time = 1 * (2 ** retry)  # 2s, 4s, 8s
+                    logger.info(f"⏱️ Tentative {retry+1}/{max_retries} pour obtenir un devis (attente: {backoff_time}s)...")
+                    time.sleep(backoff_time)
+                
+                response = requests.get(
+                    f"{JUPITER_API_BASE}/quote", 
+                    params=quote_params,
+                    timeout=15  # Timeout augmenté
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Calculer le montant de sortie en SOL (conversion de lamports à SOL)
+                    out_amount_sol = float(data["outAmount"]) / 1_000_000_000
+                    
+                    # Calculer l'impact sur le prix
+                    price_impact_percent = float(data.get("priceImpactPct", 0)) * 100
+                    
+                    # Afficher des informations supplémentaires sur la route
+                    route_info = data.get("routePlan", [])
+                    if route_info:
+                        route_summary = []
+                        for step in route_info:
+                            swap_info = f"{step.get('swapInfo', {}).get('label', 'Unknown')}"
+                            route_summary.append(swap_info)
+                        logger.info(f"🛣️ Route: {' → '.join(route_summary)}")
+                    
+                    return {
+                        "status": "success",
+                        "out_amount": out_amount_sol,
+                        "price_impact": f"{price_impact_percent:.4f}%",
+                        "quote_response": data
+                    }
+                elif response.status_code == 429:
+                    # Rate limit - attendre plus longtemps
+                    logger.warning(f"⚠️ Rate limit atteint sur l'API Jupiter (429), attente avant nouvelle tentative...")
+                    time.sleep(5)  # Attente plus longue pour rate limit
+                else:
+                    logger.warning(f"⚠️ Erreur API Jupiter: {response.status_code} - {response.text}")
+                    
+                    # Si c'est une erreur de validation ou de paramètres, ne pas réessayer
+                    if response.status_code in [400, 422]:
+                        return {
+                            "status": "error",
+                            "message": f"Erreur API Jupiter: {response.status_code} - {response.text}"
+                        }
+            except requests.exceptions.Timeout:
+                logger.warning(f"⚠️ Timeout lors de l'obtention du devis (tentative {retry+1}/{max_retries})")
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"⚠️ Erreur de connexion à l'API Jupiter (tentative {retry+1}/{max_retries})")
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur lors de l'obtention du devis: {str(e)} (tentative {retry+1}/{max_retries})")
+        
+        # Toutes les tentatives ont échoué
+        logger.error("❌ Échec d'obtention du devis après plusieurs tentatives")
+        return {
+            "status": "error",
+            "message": "Échec d'obtention du devis après plusieurs tentatives"
+        }
             
     except Exception as e:
         logger.error(f"❌ Erreur lors de l'obtention du devis: {str(e)}")
@@ -254,37 +309,69 @@ def create_jupiter_transaction(wallet_address, quote_data, priority_fee=5000):
             "quoteResponse": quote_data,
             "userPublicKey": wallet_address,
             "wrapAndUnwrapSol": True,
-            "prioritizationFeeLamports": priority_fee
-            # Suppression des paramètres qui pourraient causer des problèmes
-            # "computeUnitPriceMicroLamports": priority_fee,
-            # "maxRetries": 3,
-            # "skipUserAccountsCheck": False
+            "prioritizationFeeLamports": priority_fee,
+            "maxRetries": 3
         }
         
         logger.info(f"🏗️ Création d'une transaction via Jupiter (priorité: {priority_fee} lamports)...")
-        swap_response = requests.post(f"{JUPITER_API_BASE}/swap", json=swap_params)
         
-        if swap_response.status_code != 200:
-            error_text = swap_response.text
-            logger.error(f"❌ Erreur API Jupiter: {error_text}")
-            return {
-                "status": "error",
-                "message": f"Erreur lors de la création de la transaction: {error_text}"
-            }
+        # Essayer plusieurs fois avec backoff exponentiel
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                if retry > 0:
+                    backoff_time = 1 * (2 ** retry)  # 2s, 4s, 8s
+                    logger.info(f"⏱️ Tentative {retry+1}/{max_retries} pour créer la transaction (attente: {backoff_time}s)...")
+                    time.sleep(backoff_time)
+                
+                swap_response = requests.post(
+                    f"{JUPITER_API_BASE}/swap", 
+                    json=swap_params,
+                    timeout=15  # Timeout augmenté
+                )
+                
+                if swap_response.status_code == 200:
+                    swap_data = swap_response.json()
+                    transaction_data = swap_data["swapTransaction"]
+                    
+                    # Vérifier si d'autres informations utiles sont disponibles
+                    other_info = {}
+                    for key in ["addressLookupTableAddresses", "swapTransactionLogs"]:
+                        if key in swap_data:
+                            other_info[key] = swap_data[key]
+                    
+                    return {
+                        "status": "success",
+                        "transaction": transaction_data,
+                        "other_info": other_info
+                    }
+                elif swap_response.status_code == 429:
+                    # Rate limit - attendre plus longtemps
+                    logger.warning(f"⚠️ Rate limit atteint sur l'API Jupiter (429), attente avant nouvelle tentative...")
+                    time.sleep(5)  # Attente plus longue pour rate limit
+                else:
+                    error_text = swap_response.text
+                    logger.warning(f"⚠️ Erreur API Jupiter: {swap_response.status_code} - {error_text}")
+                    
+                    # Si c'est une erreur de validation ou de paramètres, ne pas réessayer
+                    if swap_response.status_code in [400, 422]:
+                        logger.error(f"❌ Erreur de validation Jupiter: {error_text}")
+                        return {
+                            "status": "error",
+                            "message": f"Erreur lors de la création de la transaction: {error_text}"
+                        }
+            except requests.exceptions.Timeout:
+                logger.warning(f"⚠️ Timeout lors de la création de transaction (tentative {retry+1}/{max_retries})")
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"⚠️ Erreur de connexion à l'API Jupiter (tentative {retry+1}/{max_retries})")
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur lors de la création de transaction: {str(e)} (tentative {retry+1}/{max_retries})")
         
-        swap_data = swap_response.json()
-        transaction_data = swap_data["swapTransaction"]
-        
-        # Vérifier si d'autres informations utiles sont disponibles
-        other_info = {}
-        for key in ["addressLookupTableAddresses", "swapTransactionLogs"]:
-            if key in swap_data:
-                other_info[key] = swap_data[key]
-        
+        # Toutes les tentatives ont échoué
+        logger.error("❌ Échec de création de transaction après plusieurs tentatives")
         return {
-            "status": "success",
-            "transaction": transaction_data,
-            "other_info": other_info
+            "status": "error",
+            "message": "Échec de création de transaction après plusieurs tentatives"
         }
         
     except Exception as e:
@@ -305,49 +392,87 @@ def check_transaction_status(tx_signature, max_retries=5):
     Returns:
         dict: Statut de la transaction
     """
+    # Liste des RPC à essayer
+    rpc_endpoints = [
+        RPC_URL,
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-mainnet.rpc.extrnode.com",
+        "https://rpc.ankr.com/solana"
+    ]
+    
     retry_count = 0
     while retry_count < max_retries:
         try:
-            # Attendre un peu avant de vérifier
-            time.sleep(2)
+            # Attendre un peu avant de vérifier (temps d'attente croissant)
+            wait_time = 2 * (1 + retry_count * 0.5)  # 2s, 3s, 4s, 5s, 6s
+            logger.info(f"⏳ Vérification du statut dans {wait_time:.1f}s (tentative {retry_count+1}/{max_retries})...")
+            time.sleep(wait_time)
             
-            # Créer une requête RPC
-            payload = {
-                "jsonrpc": "2.0",
-                "id": str(int(time.time())),
-                "method": "getTransaction",
-                "params": [
-                    tx_signature,
-                    {
-                        "commitment": "confirmed",
-                        "encoding": "json"
+            # Essayer chaque RPC jusqu'à ce qu'un fonctionne
+            for rpc_url in rpc_endpoints:
+                try:
+                    # Créer une requête RPC
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": str(int(time.time())),
+                        "method": "getTransaction",
+                        "params": [
+                            tx_signature,
+                            {
+                                "commitment": "confirmed",
+                                "encoding": "json",
+                                "maxSupportedTransactionVersion": 0
+                            }
+                        ]
                     }
-                ]
-            }
+                    
+                    # Envoyer la requête
+                    headers = {"Content-Type": "application/json"}
+                    response = requests.post(rpc_url, headers=headers, json=payload, timeout=10)
+                    
+                    if response.status_code != 200:
+                        logger.warning(f"⚠️ Statut HTTP non-200 de {rpc_url}: {response.status_code}")
+                        continue
+                    
+                    result = response.json()
+                    
+                    # Vérifier si la transaction a été confirmée
+                    if "result" in result and result["result"] is not None:
+                        tx_data = result["result"]
+                        if tx_data.get("meta", {}).get("err") is None:
+                            logger.info(f"✅ Transaction confirmée: {tx_signature}")
+                            return {
+                                "status": "confirmed",
+                                "txid": tx_signature,
+                                "rpc_used": rpc_url
+                            }
+                        else:
+                            error = tx_data.get("meta", {}).get("err")
+                            logger.error(f"❌ Transaction échouée: {error}")
+                            return {
+                                "status": "failed",
+                                "error": str(error),
+                                "txid": tx_signature,
+                                "rpc_used": rpc_url
+                            }
+                    elif "error" in result:
+                        error_msg = result["error"].get("message", "Erreur inconnue")
+                        logger.warning(f"⚠️ Erreur RPC {rpc_url}: {error_msg}")
+                        # Si c'est une erreur de transaction non trouvée, essayer un autre RPC
+                        continue
+                    else:
+                        # Transaction pas encore confirmée, essayer un autre RPC
+                        logger.info(f"⏳ Transaction non trouvée sur {rpc_url}, essai d'un autre RPC...")
+                        continue
+                        
+                except requests.exceptions.Timeout:
+                    logger.warning(f"⚠️ Timeout lors de la vérification via {rpc_url}")
+                except requests.exceptions.ConnectionError:
+                    logger.warning(f"⚠️ Erreur de connexion à {rpc_url}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Erreur lors de la vérification via {rpc_url}: {str(e)}")
             
-            # Envoyer la requête
-            headers = {"Content-Type": "application/json"}
-            response = requests.post(RPC_URL, headers=headers, json=payload)
-            result = response.json()
-            
-            # Vérifier si la transaction a été confirmée
-            if "result" in result and result["result"] is not None:
-                tx_data = result["result"]
-                if tx_data.get("meta", {}).get("err") is None:
-                    logger.info(f"✅ Transaction confirmée: {tx_signature}")
-                    return {
-                        "status": "confirmed",
-                        "txid": tx_signature
-                    }
-                else:
-                    error = tx_data.get("meta", {}).get("err")
-                    logger.error(f"❌ Transaction échouée: {error}")
-                    return {
-                        "status": "failed",
-                        "error": str(error),
-                        "txid": tx_signature
-                    }
-            
+            # Si on arrive ici, aucun RPC n'a trouvé la transaction
             logger.info(f"⏳ Transaction en attente, nouvelle tentative ({retry_count+1}/{max_retries})...")
             retry_count += 1
             
@@ -358,7 +483,8 @@ def check_transaction_status(tx_signature, max_retries=5):
     logger.warning(f"⚠️ Impossible de confirmer la transaction après {max_retries} tentatives")
     return {
         "status": "unknown",
-        "txid": tx_signature
+        "txid": tx_signature,
+        "message": f"Statut inconnu après {max_retries} tentatives de vérification"
     }
 
 def send_transaction(transaction_data, skip_preflight=False):
@@ -412,46 +538,108 @@ def send_transaction(transaction_data, skip_preflight=False):
             ]
         }
         
-        # Liste des RPC à essayer
+        # Liste des RPC à essayer - ajout de plusieurs endpoints fiables
         rpc_endpoints = [
             RPC_URL,
-            "https://solana-mainnet.g.alchemy.com/v2/demo",
             "https://api.mainnet-beta.solana.com",
-            "https://solana-api.projectserum.com"
+            "https://solana-mainnet.rpc.extrnode.com",
+            "https://solana.api.chainstack.com/mainnet-beta",
+            "https://mainnet.helius-rpc.com/?api-key=1d8740dc-e5f4-421c-b823-e1bad1889eff",
+            "https://solana-mainnet.g.alchemy.com/v2/demo",
+            "https://solana-api.projectserum.com",
+            "https://rpc.ankr.com/solana"
         ]
         
+        # Fonction pour essayer un RPC avec backoff exponentiel
+        def try_rpc_with_backoff(rpc_url, max_retries=3):
+            for retry in range(max_retries):
+                try:
+                    backoff_time = 0.5 * (2 ** retry)  # 0.5s, 1s, 2s
+                    if retry > 0:
+                        logger.info(f"⏱️ Tentative {retry+1}/{max_retries} pour {rpc_url} (attente: {backoff_time}s)...")
+                        time.sleep(backoff_time)
+                    
+                    response = requests.post(rpc_url, headers=headers, json=payload, timeout=15)  # Timeout augmenté
+                    
+                    # Vérifier si la réponse est valide
+                    if response.status_code != 200:
+                        logger.warning(f"⚠️ Statut HTTP non-200 de {rpc_url}: {response.status_code}")
+                        continue
+                    
+                    try:
+                        result = response.json()
+                    except ValueError:
+                        logger.warning(f"⚠️ Réponse non-JSON de {rpc_url}")
+                        continue
+                    
+                    if "error" not in result:
+                        tx_signature = result["result"]
+                        logger.info(f"✅ Transaction envoyée avec succès via {rpc_url}")
+                        
+                        # Créer URL Solana Explorer
+                        explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
+                        
+                        return {
+                            "status": "success",
+                            "txid": tx_signature,
+                            "explorer_url": explorer_url,
+                            "rpc_used": rpc_url
+                        }
+                    else:
+                        error_message = result['error'].get('message', 'Erreur inconnue')
+                        error_code = result['error'].get('code', 0)
+                        logger.warning(f"⚠️ Erreur RPC {rpc_url}: {error_message} (code: {error_code})")
+                        
+                        # Si c'est une erreur de signature, c'est probablement un problème avec la transaction
+                        if "signature verification failure" in error_message.lower():
+                            logger.error(f"❌ Erreur de vérification de signature sur {rpc_url}")
+                            # Ne pas réessayer ce RPC, mais continuer avec les autres
+                            return {
+                                "status": "error",
+                                "message": f"Erreur de vérification de signature: {error_message}",
+                                "rpc_used": rpc_url,
+                                "retry_different_rpc": True
+                            }
+                        
+                        # Si c'est une erreur de blockhash, essayer avec skipPreflight=true
+                        if ("blockhash" in error_message.lower() or 
+                            "block height" in error_message.lower() or 
+                            "too old" in error_message.lower()) and not skip_preflight:
+                            logger.info("🔄 Tentative avec skipPreflight=true...")
+                            return send_transaction(transaction_data, skip_preflight=True)
+                except requests.exceptions.Timeout:
+                    logger.warning(f"⚠️ Timeout pour {rpc_url} (tentative {retry+1}/{max_retries})")
+                except requests.exceptions.ConnectionError:
+                    logger.warning(f"⚠️ Erreur de connexion à {rpc_url} (tentative {retry+1}/{max_retries})")
+                except Exception as e:
+                    logger.warning(f"⚠️ Erreur avec {rpc_url}: {str(e)} (tentative {retry+1}/{max_retries})")
+            
+            # Toutes les tentatives ont échoué pour ce RPC
+            return {
+                "status": "error",
+                "message": f"Échec après {max_retries} tentatives sur {rpc_url}",
+                "rpc_used": rpc_url,
+                "retry_different_rpc": True
+            }
+        
         # Essayer chaque RPC jusqu'à ce qu'un fonctionne
+        last_error = None
         for rpc_url in rpc_endpoints:
             logger.info(f"📤 Envoi de la transaction via RPC: {rpc_url}...")
-            try:
-                response = requests.post(rpc_url, headers=headers, json=payload, timeout=10)
-                result = response.json()
-                
-                if "error" not in result:
-                    tx_signature = result["result"]
-                    logger.info(f"✅ Transaction envoyée avec succès via {rpc_url}")
-                    
-                    # Créer URL Solana Explorer
-                    explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
-                    
-                    return {
-                        "status": "success",
-                        "txid": tx_signature,
-                        "explorer_url": explorer_url
-                    }
-                else:
-                    error_message = result['error'].get('message', 'Erreur inconnue')
-                    logger.error(f"❌ Erreur RPC {rpc_url}: {error_message}")
-                    
-                    # Si c'est une erreur de blockhash, essayer avec skipPreflight=true
-                    if "blockhash" in error_message.lower() and not skip_preflight:
-                        logger.info("🔄 Tentative avec skipPreflight=true...")
-                        return send_transaction(transaction_data, skip_preflight=True)
-            except Exception as e:
-                logger.error(f"❌ Erreur de connexion à {rpc_url}: {str(e)}")
+            result = try_rpc_with_backoff(rpc_url)
+            
+            if result["status"] == "success":
+                return result
+            
+            last_error = result
+            
+            # Si ce n'est pas une erreur qui suggère d'essayer un autre RPC, arrêter ici
+            if not result.get("retry_different_rpc", False):
+                break
         
         # Si tous les RPC ont échoué
         logger.error("❌ Tous les RPC ont échoué")
+        error_message = last_error.get("message", "Raison inconnue") if last_error else "Tous les RPC ont échoué"
         return {
             "status": "error",
             "message": "Échec de l'envoi: Tous les RPC ont échoué"
@@ -479,7 +667,10 @@ def execute_jupiter_swap_direct(keypair, quote_data):
         wallet_address = str(keypair.pubkey())
         
         # Liste des frais de priorité à essayer, du plus bas au plus élevé
-        priority_fees = [5000, 20000, 50000, 100000]
+        priority_fees = [5000, 20000, 50000, 100000, 200000]
+        
+        # Stocker les erreurs pour chaque tentative
+        attempt_errors = []
         
         # Essayer avec différents frais de priorité
         for priority_fee in priority_fees:
@@ -487,7 +678,13 @@ def execute_jupiter_swap_direct(keypair, quote_data):
             tx_result = create_jupiter_transaction(wallet_address, quote_data, priority_fee=priority_fee)
             
             if tx_result["status"] != "success":
-                logger.warning(f"⚠️ Échec de création de transaction avec priorité {priority_fee}: {tx_result['message']}")
+                error_msg = f"Échec de création de transaction avec priorité {priority_fee}: {tx_result.get('message', 'Erreur inconnue')}"
+                logger.warning(f"⚠️ {error_msg}")
+                attempt_errors.append({
+                    "priority_fee": priority_fee,
+                    "stage": "creation",
+                    "error": tx_result.get('message', 'Erreur inconnue')
+                })
                 continue
             
             # 2. Signer la transaction avec notre keypair
@@ -509,10 +706,18 @@ def execute_jupiter_swap_direct(keypair, quote_data):
                         "explorer_url": send_result["explorer_url"],
                         "input_amount": 1.0,
                         "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
-                        "priority_fee_used": priority_fee
+                        "priority_fee_used": priority_fee,
+                        "rpc_used": send_result.get("rpc_used", "unknown")
                     }
                 elif tx_status["status"] == "failed":
-                    logger.warning(f"⚠️ Transaction échouée avec priorité {priority_fee}: {tx_status.get('error', 'Erreur inconnue')}")
+                    error_msg = f"Transaction échouée avec priorité {priority_fee}: {tx_status.get('error', 'Erreur inconnue')}"
+                    logger.warning(f"⚠️ {error_msg}")
+                    attempt_errors.append({
+                        "priority_fee": priority_fee,
+                        "stage": "confirmation",
+                        "error": tx_status.get('error', 'Erreur inconnue'),
+                        "txid": send_result["txid"]
+                    })
                     # Continuer avec le prochain niveau de frais
                 else:
                     # Si le statut est "pending" ou "unknown", considérer comme un succès
@@ -523,17 +728,31 @@ def execute_jupiter_swap_direct(keypair, quote_data):
                         "explorer_url": send_result["explorer_url"],
                         "input_amount": 1.0,
                         "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
-                        "priority_fee_used": priority_fee
+                        "priority_fee_used": priority_fee,
+                        "rpc_used": send_result.get("rpc_used", "unknown")
                     }
             else:
-                logger.warning(f"⚠️ Échec d'envoi avec priorité {priority_fee}: {send_result['message']}")
+                error_msg = f"Échec d'envoi avec priorité {priority_fee}: {send_result.get('message', 'Erreur inconnue')}"
+                logger.warning(f"⚠️ {error_msg}")
+                attempt_errors.append({
+                    "priority_fee": priority_fee,
+                    "stage": "sending",
+                    "error": send_result.get('message', 'Erreur inconnue'),
+                    "rpc_used": send_result.get("rpc_used", "unknown")
+                })
                 # Continuer avec le prochain niveau de frais
         
         # Si toutes les tentatives ont échoué
+        last_error = "Erreur inconnue"
+        if attempt_errors:
+            last_error = attempt_errors[-1].get('error', 'Erreur inconnue')
+        
         return {
             "status": "error",
             "message": "Échec après plusieurs tentatives avec différents frais de priorité",
-            "last_error": send_result.get('message', 'Erreur inconnue')
+            "last_error": last_error,
+            "attempt_errors": attempt_errors,
+            "attempted_priority_fees": priority_fees
         }
             
     except Exception as e:
