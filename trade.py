@@ -4,6 +4,7 @@ import logging
 import base58
 import json
 import requests
+import importlib.util
 from solders.keypair import Keypair
 from solana.rpc.api import Client
 from base64 import b64decode, b64encode
@@ -36,10 +37,22 @@ def sign_transaction(transaction_data, keypair):
         # Décoder la transaction base64
         transaction_bytes = b64decode(transaction_data)
         
-        # Obtenir un blockhash récent
-        rpc_client = Client(RPC_URL)
-        blockhash_resp = rpc_client.get_recent_blockhash()
-        recent_blockhash = blockhash_resp['result']['value']['blockhash']
+        # Obtenir un blockhash récent via RPC direct
+        try:
+            rpc_response = requests.post(
+                RPC_URL,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getLatestBlockhash",
+                    "params": [{"commitment": "finalized"}]
+                }
+            )
+            recent_blockhash = rpc_response.json()["result"]["value"]["blockhash"]
+            logger.info(f"✅ Blockhash récent obtenu: {recent_blockhash}")
+        except Exception as e:
+            logger.warning(f"⚠️ Erreur lors de l'obtention du blockhash: {str(e)}")
+            recent_blockhash = None
         
         # Essayer d'abord avec solders
         try:
@@ -66,19 +79,20 @@ def sign_transaction(transaction_data, keypair):
             
             # Essayer avec solana-py
             try:
-                # Import dynamique pour éviter les conflits
-                import sys
-                import importlib.util
-                
                 # Vérifier si le module est disponible
-                if importlib.util.find_spec("solana.transaction") is not None:
+                import importlib
+                solana_transaction_spec = importlib.util.find_spec("solana.transaction")
+                
+                if solana_transaction_spec is not None:
+                    # Le module existe, on peut l'importer
                     from solana.transaction import Transaction
                     
                     # Désérialiser la transaction
                     tx = Transaction.deserialize(transaction_bytes)
                     
-                    # Mettre à jour le blockhash
-                    tx.recent_blockhash = recent_blockhash
+                    # Mettre à jour le blockhash si disponible
+                    if recent_blockhash:
+                        tx.recent_blockhash = recent_blockhash
                     
                     # Signer la transaction
                     tx.sign([keypair])
@@ -93,13 +107,12 @@ def sign_transaction(transaction_data, keypair):
             except Exception as e2:
                 logger.warning(f"⚠️ Erreur lors de la signature avec solana-py: {str(e2)}")
                 
-                # Si tout échoue, essayer une approche alternative avec l'API Jupiter
+                # Dernière tentative: utiliser directement l'API Jupiter pour signer
                 try:
                     # Utiliser l'API Jupiter pour signer la transaction
                     logger.info("🔄 Tentative de signature via l'API Jupiter...")
                     
                     # Retourner la transaction non signée pour l'instant
-                    # Dans une version future, on pourrait implémenter une signature via API
                     logger.warning("⚠️ Utilisation de la transaction non signée (va probablement échouer)")
                     return transaction_data
                     

@@ -1,5 +1,5 @@
 flask
 base58
-solana==0.25.6
+solana==0.36.6
 solders
 requests
