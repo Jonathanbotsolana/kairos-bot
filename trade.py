@@ -1,39 +1,56 @@
 import os
 import base58
+import subprocess
 from flask import Flask, jsonify
 from solders.keypair import Keypair
-from solders.pubkey import Pubkey
 
-# Récupération de la clé privée Phantom depuis la variable d'environnement
-phantom_key_base58 = os.environ.get("PHANTOM_KEY_BASE58")
+# 🔐 Clé Phantom exportée en base58 depuis l'environnement Render
+phantom_base58 = os.getenv("PHANTOM_PRIVATE_KEY_BASE58")
 
-if not phantom_key_base58:
-    raise ValueError("❌ Clé privée PHANTOM non trouvée dans l'environnement")
+if not phantom_base58:
+    raise ValueError("⚠️ Variable d'environnement PHANTOM_PRIVATE_KEY_BASE58 manquante")
 
-# Décodage et création du keypair
-decoded_key = base58.b58decode(phantom_key_base58)
-if len(decoded_key) == 32:
-    keypair = Keypair.from_seed(decoded_key)
-elif len(decoded_key) == 64:
-    keypair = Keypair.from_bytes(decoded_key)
-else:
-    raise ValueError("❌ Format de clé non reconnu (doit être 32 ou 64 bytes)")
+try:
+    decoded = base58.b58decode(phantom_base58)
+    if len(decoded) == 64:
+        keypair = Keypair.from_bytes(decoded)
+    elif len(decoded) == 32:
+        raise ValueError("❌ Clé Phantom trop courte : 32 bytes. Exporte-la depuis Phantom, pas depuis seed.")
+    else:
+        raise ValueError("❌ Format non reconnu")
+except Exception as e:
+    raise RuntimeError(f"❌ Erreur de décodage de la clé Phantom : {e}")
 
-# Initialisation de l'application Flask
+wallet_address = str(keypair.pubkey())
+print(f"✅ Wallet chargé : {wallet_address}")
+
+# === FLASK SERVER ===
 app = Flask(__name__)
 
 @app.route("/")
-def index():
-    return "🧠 Kairos bot is alive and running!"
-
-@app.route("/status")
 def status():
     return jsonify({
         "bot": "Kairos",
         "network": "mainnet-beta",
         "status": "active",
-        "wallet": str(keypair.pubkey())
+        "wallet": wallet_address
     })
 
+@app.route("/trade")
+def trigger_trade():
+    try:
+        print("🚀 Lancement manuel de trade.py via /trade")
+        result = subprocess.run(["python", "trade.py"], capture_output=True, text=True)
+        return jsonify({
+            "status": "Trade executed manually",
+            "stdout": result.stdout,
+            "stderr": result.stderr
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=10000)
+    print("🎯 Lancement automatique du premier trade")
+    subprocess.Popen(["python", "trade.py"])
+    app.run(host="0.0.0.0", port=10000)
+
