@@ -81,6 +81,7 @@ def sign_transaction(transaction_data, keypair):
                 from solders.transaction import Transaction as SoldersTransaction
                 from solders.message import Message
                 from solders.hash import Hash
+                from solders.signature import Signature as SoldersSignature
                 
                 # Utiliser le blockhash récent obtenu précédemment
                 if recent_blockhash:
@@ -90,7 +91,8 @@ def sign_transaction(transaction_data, keypair):
                     message = Message.from_bytes(transaction_bytes)
                     
                     # Signer le message
-                    signature = keypair.sign_message(bytes(message))
+                    signature_bytes = bytes(keypair.sign_message(bytes(message)))
+                    signature = SoldersSignature.from_bytes(signature_bytes)
                     
                     # Créer une transaction signée avec le blockhash récent
                     tx = SoldersTransaction(message, [signature], blockhash)
