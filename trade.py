@@ -179,8 +179,6 @@ def execute_jupiter_swap_direct(keypair, quote_data):
         
         logger.info("📡 Préparation de l'envoi de la transaction via RPC...")
         
-        # 5. Créer un compte de type walletAdapter pour Jupiter v4
-        # Préparer les données pour l'API Jupiter Direct Swap
         try:
             # Appel à l'API SwapInstructions de Jupiter pour obtenir des instructions séparées
             logger.info("🔧 Obtention des instructions séparées via Jupiter...")
@@ -198,136 +196,249 @@ def execute_jupiter_swap_direct(keypair, quote_data):
                 # Si on ne peut pas obtenir les instructions séparées, on utilise la transaction complète
                 logger.info("📝 Utilisation du processus standard Jupiter v6...")
                 
-                # Méthode manuelle d'envoi de transaction
-                # Créer une requête RPC directe
-                sign_payload = {
-                    "jsonrpc": "2.0",
-                    "id": str(int(time.time())),
-                    "method": "sendTransaction",
-                    "params": [
-                        transaction_data,
-                        {
-                            "skipPreflight": False,
-                            "preflightCommitment": "confirmed",
-                            "encoding": "base64",
-                            "maxRetries": 3
-                        }
-                    ]
-                }
+                # Décoder la transaction base64 pour la signer
+                transaction_bytes = b64decode(transaction_data)
                 
-                logger.info(f"📤 Envoi de la transaction encodée via RPC...")
-                sign_response = requests.post(rpc_url, headers=headers, json=sign_payload)
-                sign_result = sign_response.json()
+                # Créer un client Solana
+                solana_client = Client(rpc_url)
                 
-                if "error" in sign_result:
-                    logger.error(f"❌ Erreur RPC: {sign_result['error']}")
-                    return {
-                        "status": "error",
-                        "message": f"Erreur lors de l'envoi: {sign_result['error'].get('message', 'Erreur inconnue')}"
+                # Importer les classes nécessaires pour la signature
+                from solana.transaction import Transaction
+                
+                try:
+                    # Désérialiser la transaction
+                    tx = Transaction.deserialize(transaction_bytes)
+                    
+                    # Signer la transaction avec notre keypair
+                    tx.sign([keypair])
+                    
+                    # Sérialiser la transaction signée
+                    signed_tx_data = b64encode(tx.serialize()).decode('utf-8')
+                    
+                    # Créer une requête RPC directe avec la transaction signée
+                    sign_payload = {
+                        "jsonrpc": "2.0",
+                        "id": str(int(time.time())),
+                        "method": "sendTransaction",
+                        "params": [
+                            signed_tx_data,  # Utiliser la transaction signée
+                            {
+                                "skipPreflight": False,
+                                "preflightCommitment": "confirmed",
+                                "encoding": "base64",
+                                "maxRetries": 3
+                            }
+                        ]
                     }
-                
-                tx_signature = sign_result["result"]
-                logger.info(f"📝 Transaction envoyée avec signature: {tx_signature}")
-                
-                # Créer URL Solana Explorer
-                explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
-                
-                return {
-                    "status": "pending",
-                    "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
-                    "txid": tx_signature,
-                    "explorer_url": explorer_url,
-                    "input_amount": 1.0,
-                    "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
-                }
+                    
+                    logger.info(f"📤 Envoi de la transaction signée via RPC...")
+                    sign_response = requests.post(rpc_url, headers=headers, json=sign_payload)
+                    sign_result = sign_response.json()
+                    
+                    if "error" in sign_result:
+                        logger.error(f"❌ Erreur RPC: {sign_result['error']}")
+                        return {
+                            "status": "error",
+                            "message": f"Erreur lors de l'envoi: {sign_result['error'].get('message', 'Erreur inconnue')}"
+                        }
+                    
+                    tx_signature = sign_result["result"]
+                    logger.info(f"📝 Transaction envoyée avec signature: {tx_signature}")
+                    
+                    # Créer URL Solana Explorer
+                    explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
+                    
+                    return {
+                        "status": "pending",
+                        "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
+                        "txid": tx_signature,
+                        "explorer_url": explorer_url,
+                        "input_amount": 1.0,
+                        "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors de la signature de la transaction: {str(e)}")
+                    
+                    # Essayer une approche alternative avec l'API Jupiter
+                    logger.info("🔄 Tentative avec l'API Jupiter directe...")
+                    
+                    # Utiliser l'API Jupiter pour créer et signer la transaction
+                    from solders.message import Message
+                    from solders.transaction import VersionedTransaction
+                    
+                    # Obtenir les instructions de swap
+                    instr_response = requests.post(f"{JUPITER_API_BASE}/swap-instructions", json=swap_instr_params)
+                    
+                    if instr_response.status_code != 200:
+                        raise Exception(f"Impossible d'obtenir les instructions: {instr_response.text}")
+                    
+                    instr_data = instr_response.json()
+                    
+                    # Créer un client Solana
+                    solana_client = Client(rpc_url)
+                    
+                    # Obtenir le blockhash récent
+                    blockhash_resp = solana_client.get_latest_blockhash()
+                    if blockhash_resp.value is None:
+                        raise Exception("Impossible d'obtenir le blockhash récent")
+                    
+                    # Créer une transaction avec les instructions de Jupiter
+                    from solana.transaction import Transaction
+                    
+                    # Créer une transaction
+                    tx = Transaction()
+                    tx.recent_blockhash = blockhash_resp.value.blockhash
+                    
+                    # Ajouter les instructions à la transaction
+                    for instr in instr_data["instructions"]:
+                        from solana.instruction import Instruction
+                        import base58
+                        
+                        # Créer une instruction Solana
+                        program_id = base58.b58decode(instr["programId"])
+                        
+                        # Préparer les comptes
+                        accounts = []
+                        for acc in instr["accounts"]:
+                            accounts.append({
+                                "pubkey": base58.b58decode(acc["pubkey"]),
+                                "is_signer": acc["isSigner"],
+                                "is_writable": acc["isWritable"]
+                            })
+                        
+                        # Décoder les données
+                        data = b64decode(instr["data"])
+                        
+                        # Créer l'instruction
+                        instruction = Instruction(program_id, accounts, data)
+                        tx.add(instruction)
+                    
+                    # Signer la transaction
+                    tx.sign([keypair])
+                    
+                    # Sérialiser la transaction signée
+                    signed_tx_data = b64encode(tx.serialize()).decode('utf-8')
+                    
+                    # Envoyer la transaction signée
+                    sign_payload = {
+                        "jsonrpc": "2.0",
+                        "id": str(int(time.time())),
+                        "method": "sendTransaction",
+                        "params": [
+                            signed_tx_data,
+                            {
+                                "skipPreflight": False,
+                                "preflightCommitment": "confirmed",
+                                "encoding": "base64",
+                                "maxRetries": 3
+                            }
+                        ]
+                    }
+                    
+                    logger.info(f"📤 Envoi de la transaction signée via RPC...")
+                    sign_response = requests.post(rpc_url, headers=headers, json=sign_payload)
+                    sign_result = sign_response.json()
+                    
+                    if "error" in sign_result:
+                        logger.error(f"❌ Erreur RPC: {sign_result['error']}")
+                        return {
+                            "status": "error",
+                            "message": f"Erreur lors de l'envoi: {sign_result['error'].get('message', 'Erreur inconnue')}"
+                        }
+                    
+                    tx_signature = sign_result["result"]
+                    logger.info(f"📝 Transaction envoyée avec signature: {tx_signature}")
+                    
+                    # Créer URL Solana Explorer
+                    explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
+                    
+                    return {
+                        "status": "pending",
+                        "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
+                        "txid": tx_signature,
+                        "explorer_url": explorer_url,
+                        "input_amount": 1.0,
+                        "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
+                    }
             else:
+                # Nous avons obtenu les instructions séparées, mais nous allons quand même utiliser l'approche standard
+                # car l'implémentation des instructions séparées nécessite plus de développement
                 logger.info("⚠️ Obtention des instructions OK, mais cette approche nécessite plus de développement")
                 logger.info("🔄 Repli sur l'approche standard...")
                 
-                # Continuer avec l'approche standard comme au-dessus
-                sign_payload = {
-                    "jsonrpc": "2.0",
-                    "id": str(int(time.time())),
-                    "method": "sendTransaction",
-                    "params": [
-                        transaction_data,
-                        {
-                            "skipPreflight": False,
-                            "preflightCommitment": "confirmed",
-                            "encoding": "base64"
+                # Décoder la transaction base64 pour la signer
+                transaction_bytes = b64decode(transaction_data)
+                
+                # Créer un client Solana
+                solana_client = Client(rpc_url)
+                
+                # Importer les classes nécessaires pour la signature
+                from solana.transaction import Transaction
+                
+                try:
+                    # Désérialiser la transaction
+                    tx = Transaction.deserialize(transaction_bytes)
+                    
+                    # Signer la transaction avec notre keypair
+                    tx.sign([keypair])
+                    
+                    # Sérialiser la transaction signée
+                    signed_tx_data = b64encode(tx.serialize()).decode('utf-8')
+                    
+                    # Créer une requête RPC directe avec la transaction signée
+                    sign_payload = {
+                        "jsonrpc": "2.0",
+                        "id": str(int(time.time())),
+                        "method": "sendTransaction",
+                        "params": [
+                            signed_tx_data,  # Utiliser la transaction signée
+                            {
+                                "skipPreflight": False,
+                                "preflightCommitment": "confirmed",
+                                "encoding": "base64"
+                            }
+                        ]
+                    }
+                    
+                    logger.info(f"📤 Envoi de la transaction signée via RPC...")
+                    sign_response = requests.post(rpc_url, headers=headers, json=sign_payload)
+                    sign_result = sign_response.json()
+                    
+                    if "error" in sign_result:
+                        logger.error(f"❌ Erreur RPC: {sign_result['error']}")
+                        return {
+                            "status": "error",
+                            "message": f"Erreur lors de l'envoi: {sign_result['error'].get('message', 'Erreur inconnue')}"
                         }
-                    ]
-                }
-                
-                logger.info(f"📤 Envoi de la transaction encodée via RPC...")
-                sign_response = requests.post(rpc_url, headers=headers, json=sign_payload)
-                sign_result = sign_response.json()
-                
-                if "error" in sign_result:
-                    logger.error(f"❌ Erreur RPC: {sign_result['error']}")
+                    
+                    tx_signature = sign_result["result"]
+                    logger.info(f"📝 Transaction envoyée avec signature: {tx_signature}")
+                    
+                    # Créer URL Solana Explorer
+                    explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
+                    
+                    return {
+                        "status": "pending",
+                        "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
+                        "txid": tx_signature,
+                        "explorer_url": explorer_url,
+                        "input_amount": 1.0,
+                        "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erreur lors de la signature de la transaction: {str(e)}")
                     return {
                         "status": "error",
-                        "message": f"Erreur lors de l'envoi: {sign_result['error'].get('message', 'Erreur inconnue')}"
+                        "message": f"Erreur lors de la signature: {str(e)}"
                     }
-                
-                tx_signature = sign_result["result"]
-                logger.info(f"📝 Transaction envoyée avec signature: {tx_signature}")
-                
-                # Créer URL Solana Explorer
-                explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
-                
-                return {
-                    "status": "pending",
-                    "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
-                    "txid": tx_signature,
-                    "explorer_url": explorer_url,
-                    "input_amount": 1.0,
-                    "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
-                }
                 
         except Exception as e:
             logger.error(f"❌ Erreur lors de l'approche alternative: {str(e)}")
-            logger.info("🔄 Tentative avec l'approche standard...")
-            
-            # Méthode standard comme au-dessus
-            sign_payload = {
-                "jsonrpc": "2.0",
-                "id": str(int(time.time())),
-                "method": "sendTransaction",
-                "params": [
-                    transaction_data,
-                    {
-                        "skipPreflight": False,
-                        "preflightCommitment": "confirmed",
-                        "encoding": "base64"
-                    }
-                ]
-            }
-            
-            logger.info(f"📤 Envoi de la transaction encodée via RPC...")
-            sign_response = requests.post(rpc_url, headers=headers, json=sign_payload)
-            sign_result = sign_response.json()
-            
-            if "error" in sign_result:
-                logger.error(f"❌ Erreur RPC: {sign_result['error']}")
-                return {
-                    "status": "error",
-                    "message": f"Erreur lors de l'envoi: {sign_result['error'].get('message', 'Erreur inconnue')}"
-                }
-            
-            tx_signature = sign_result["result"]
-            logger.info(f"📝 Transaction envoyée avec signature: {tx_signature}")
-            
-            # Créer URL Solana Explorer
-            explorer_url = f"https://explorer.solana.com/tx/{tx_signature}?cluster=mainnet-beta"
-            
             return {
-                "status": "pending",
-                "message": "Transaction envoyée, vérifiez l'explorateur Solana pour confirmation",
-                "txid": tx_signature,
-                "explorer_url": explorer_url,
-                "input_amount": 1.0,
-                "estimated_output": float(quote_data["outAmount"]) / 1_000_000_000,
+                "status": "error",
+                "message": f"Erreur lors du traitement: {str(e)}"
             }
             
     except Exception as e:
@@ -342,5 +453,3 @@ if __name__ == "__main__":
     # Ce code s'exécute uniquement si le fichier est appelé directement
     result = main()
     logger.info(f"⏹️ Script terminé avec résultat: {result}")
-
-
