@@ -4,3 +4,22 @@ solana==0.36.6
 solders
 requests
 web3
+python-dotenv
+httpx>=0.23.0
+websockets<=15.0,>=9.0
+typing-extensions>=4.2.0
+construct-typing<0.6.0,>=0.5.2
+pydantic>=2.4.0
+colorama
+loguru
+# Dépendances pour les transactions
+aiohttp
+asyncio
+retry
+backoff
+# Sécurité et gestion des clés
+cryptography
+anchorpy
+# Utilitaires
+pytz
+python-dateutil
