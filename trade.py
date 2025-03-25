@@ -76,10 +76,46 @@ def sign_transaction(transaction_data, keypair):
             
             logger.info("✅ Transaction signée avec succès (méthode simplifiée)")
             
-            # Pour le moment, retourner la transaction non signée originale
-            # car notre format personnalisé ne sera pas accepté par l'API Solana
-            logger.warning("⚠️ Utilisation de la transaction non signée (va probablement échouer)")
-            return transaction_data
+            # Utiliser la bibliothèque solana pour créer une transaction correctement signée
+            try:
+                from solana.transaction import Transaction
+                
+                # Décoder la transaction
+                tx = Transaction.deserialize(transaction_bytes)
+                
+                # Signer avec le keypair
+                tx.sign([keypair])
+                
+                # Sérialiser et encoder en base64
+                signed_tx_bytes = tx.serialize()
+                signed_tx_b64 = b64encode(signed_tx_bytes).decode('utf-8')
+                
+                logger.info("✅ Transaction signée avec succès (solana-py)")
+                return signed_tx_b64
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur lors de la signature avec solana-py: {str(e)}")
+                
+                # Si la méthode solana-py échoue, essayer avec la méthode Jupiter
+                try:
+                    # Créer une structure pour l'API Jupiter
+                    signed_tx_data = {
+                        "transaction": transaction_data,
+                        "signatures": [{
+                            "publicKey": str(keypair.pubkey()),
+                            "signature": base58.b58encode(signature_bytes).decode('utf-8')
+                        }]
+                    }
+                    
+                    # Encoder en base64
+                    signed_tx_json = json.dumps(signed_tx_data)
+                    signed_tx_b64 = b64encode(signed_tx_json.encode()).decode('utf-8')
+                    
+                    logger.info("✅ Transaction signée avec succès (format Jupiter)")
+                    return signed_tx_b64
+                except Exception as e2:
+                    logger.warning(f"⚠️ Erreur lors de la signature au format Jupiter: {str(e2)}")
+                    logger.warning("⚠️ Utilisation de la transaction non signée (va probablement échouer)")
+                    return transaction_data
             
         except Exception as e:
             logger.warning(f"⚠️ Erreur lors de la signature simplifiée: {str(e)}")
@@ -273,6 +309,21 @@ def send_transaction(transaction_data, skip_preflight=True):
     """
     try:
         headers = {"Content-Type": "application/json"}
+        
+        # Vérifier si la transaction est au format Jupiter (JSON)
+        try:
+            # Essayer de décoder et parser comme JSON
+            decoded_data = b64decode(transaction_data).decode('utf-8')
+            json_data = json.loads(decoded_data)
+            
+            # Si c'est un dict avec 'transaction' et 'signatures', c'est au format Jupiter
+            if isinstance(json_data, dict) and 'transaction' in json_data and 'signatures' in json_data:
+                logger.info("📝 Transaction au format Jupiter détectée, extraction...")
+                # Extraire la transaction réelle
+                transaction_data = json_data['transaction']
+        except:
+            # Si ce n'est pas du JSON, c'est probablement déjà une transaction encodée en base64
+            pass
         
         # Créer une requête RPC
         payload = {
