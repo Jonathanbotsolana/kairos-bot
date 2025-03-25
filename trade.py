@@ -6,7 +6,6 @@ from solders.keypair import Keypair
 
 # 🔐 Clé Phantom exportée en base58 depuis l'environnement Render
 phantom_base58 = os.getenv("PHANTOM_PRIVATE_KEY_BASE58")
-
 if not phantom_base58:
     raise ValueError("⚠️ Variable d'environnement PHANTOM_PRIVATE_KEY_BASE58 manquante")
 
